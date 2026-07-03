@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Faculty Award Nomination Tool — Texas A&M College of Engineering</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://unpkg.com/docx@8.5.0/build/index.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Helvetica Neue',Arial,sans-serif;background:#f4f4f4;color:#1a1a1a}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+input:focus{outline:none;border-color:#500000!important;box-shadow:0 0 0 3px rgba(80,0,0,.1)!important}
+textarea:focus{outline:none;border-color:#500000!important}
+button:hover:not(:disabled){filter:brightness(.92)}
+button:active:not(:disabled){transform:scale(.97)}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:#e0e0e0;border-radius:2px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useCallback,useRef,useEffect}=React;
+
+/* ── CONFIGURATION ────────────────────────────────────────────────────────────
+   Deploy a Cloudflare Worker (worker.js) and paste your worker URL below
+   to hide your API key from users. Leave empty to prompt users for their key.
+───────────────────────────────────────────────────────────────────────────── */
+const WORKER_URL=""; // e.g. "https://award-tool.yourname.workers.dev"
+
+const B={maroon:"#500000",maroonFaint:"#f9f0f0",white:"#FFFFFF",gray90:"#1a1a1a",gray70:"#4a4a4a",gray40:"#999",gray10:"#f4f4f4",gray05:"#fafafa",divider:"#e0e0e0",green:"#2E7D32",orange:"#E65100",red:"#C62828"};
+
+function endpoint(){return WORKER_URL||"https://api.anthropic.com/v1/messages";}
+function headers(k){return WORKER_URL?{"Content-Type":"application/json"}:{"Content-Type":"application/json","x-api-key":k,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"};}
+
+async function callClaude(messages,system,apiKey){
+  const r=await fetch(endpoint(),{method:"POST",headers:headers(apiKey),body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,tools:[{type:"web_search_20250305",name:"web_search"}],system,messages})});
+  if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e?.error?.message||`Error ${r.status}`);}
+  const d=await r.json();
+  const txt=d.content.filter(b=>b.type==="text").map(b=>b.text).join("");
+  const clean=txt.replace(/```json|```/g,"").trim();
+  try{return JSON.parse(clean);}catch{const m=clean.match(/\{[\s\S]*\}/);if(m)return JSON.parse(m[0]);throw new Error("Could not parse AI response.");}
+}
+
+async function genLetter(payload,apiKey){
+  const r=await fetch(endpoint(),{method:"POST",headers:headers(apiKey),body:JSON.stringify({
+    model:"claude-sonnet-4-20250514",max_tokens:2000,
+    system:`You are an expert academic writer for Texas A&M University College of Engineering. Write formal, compelling nomination letters. Respond ONLY with valid JSON, no markdown:
+{"subject":"Re: Nomination of [Name] for [Award]","salutation":"Dear Selection Committee:","body":"4-6 paragraphs separated by \\n\\n. Formal, specific, compelling. Reference specific achievements and impact.","closing":"Sincerely,","signerName":"Dean of Engineering","signerTitle":"Dean, College of Engineering","institution":"Texas A&M University"}`,
+    messages:[{role:"user",content:`Write a formal nomination letter:
+NOMINEE: ${payload.facultyName}
+POSITION: ${payload.facultyPosition||"Faculty"}
+INSTITUTION: Texas A&M University College of Engineering
+DEPARTMENT: ${payload.department||"College of Engineering"}
+RESEARCH AREAS: ${(payload.researchAreas||[]).join(", ")}
+AWARD: ${payload.awardName}
+AWARDING ORGANIZATION: ${payload.awardOrg}
+AWARD DESCRIPTION: ${payload.awardDescription||""}
+KEY RATIONALE: ${payload.rationale}
+NOTABLE WORKS: ${(payload.notableWorks||[]).join("; ")}
+CAREER HIGHLIGHTS: ${(payload.careerHighlights||[]).join("; ")}
+Write a compelling 4-6 paragraph formal nomination letter referencing specific accomplishments.`}]
+  })});
+  if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e?.error?.message||`Error ${r.status}`);}
+  const d=await r.json();
+  const txt=d.content.filter(b=>b.type==="text").map(b=>b.text).join("");
+  const clean=txt.replace(/```json|```/g,"").trim();
+  try{return JSON.parse(clean);}catch{const m=clean.match(/\{[\s\S]*\}/);if(m)return JSON.parse(m[0]);throw new Error("Could not parse letter.");}
+}
+
+const SYS_FACULTY=(cv)=>`You are an expert academic awards advisor for Texas A&M University's College of Engineering. Given a faculty member's name, use web search to research their profile, then recommend 5-7 prestigious awards.
+${cv?`\nFACULTY CV (primary source):\n${cv}\n`:""}
+Respond ONLY with valid JSON, no markdown:
+{"researcher":{"fullName":"...","currentPosition":"...","institution":"...","researchAreas":["..."],"careerHighlights":["..."],"orcidId":"... or null","totalPublications":"..."},"awards":[{"awardName":"...","organization":"...","organizationFull":"...","field":"...","matchScore":87,"careerStage":"Early Career|Mid Career|Senior|Any","description":"...","rationale":"...","evidenceTags":["..."],"nomDeadline":"..."}]}
+Use REAL awards: ACM/IEEE Fellows, NSF CAREER, Sloan, MacArthur, NAS/NAE/NAM, AAAS, Guggenheim, Fulbright, Breakthrough Prize. Sort by matchScore desc.`;
+
+const SYS_AWARD=(details)=>`You are an expert research analyst for Texas A&M University College of Engineering. Given an award, find eligibility criteria then identify 5 TAMU College of Engineering faculty ONLY.
+CRITICAL: ALL candidates must be current Texas A&M University College of Engineering faculty. Search engineering.tamu.edu.
+${details?`\nAWARD INFO:\n${details}\n`:""}
+Respond ONLY with valid JSON, no markdown:
+{"award":{"name":"...","organization":"...","organizationFull":"...","description":"...","eligibilitySummary":"...","deadline":"...","prestige":"High|Very High|Exceptional","sourceUrl":"... or null"},"candidates":[{"fullName":"...","currentPosition":"...","department":"...","institution":"Texas A&M University","researchAreas":["..."],"matchScore":87,"rationale":"...","notableWorks":["..."],"orcidId":"... or null","careerStage":"Early Career|Mid Career|Senior","profileUrl":"... or null"}]}
+Sort by matchScore desc. Every candidate MUST be TAMU CoE faculty.`;
+
+async function downloadDocx(payload,letter){
+  const {Document,Paragraph,TextRun,Table,TableRow,TableCell,WidthType,ShadingType,AlignmentType,BorderStyle,Packer,convertInchesToTwip}=docx;
+  const MAROON="500000";
+  const today=new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"});
+  const p=(text,opts={})=>new Paragraph({
+    alignment:opts.center?AlignmentType.CENTER:opts.justify?AlignmentType.JUSTIFIED:AlignmentType.LEFT,
+    indent:opts.indent?{firstLine:convertInchesToTwip(0.3)}:{},
+    spacing:{before:opts.sb||0,after:opts.sa||160},
+    border:opts.bb?{bottom:{style:BorderStyle.SINGLE,size:opts.bbs||6,color:opts.bbc||MAROON,space:4}}:{},
+    children:[new TextRun({text,font:"Garamond",size:opts.sz||22,bold:!!opts.bold,color:opts.color||"1a1a1a"})]
+  });
+  const hdrTable=new Table({
+    width:{size:100,type:WidthType.PERCENTAGE},
+    borders:{top:{style:BorderStyle.NONE},bottom:{style:BorderStyle.NONE},left:{style:BorderStyle.NONE},right:{style:BorderStyle.NONE},insideH:{style:BorderStyle.NONE},insideV:{style:BorderStyle.NONE}},
+    rows:[new TableRow({children:[
+      new TableCell({width:{size:80,type:WidthType.PERCENTAGE},shading:{type:ShadingType.CLEAR,color:"auto",fill:MAROON},children:[
+        new Paragraph({spacing:{before:120,after:40},indent:{left:120},children:[new TextRun({text:"TEXAS A&M UNIVERSITY",bold:true,size:28,font:"Garamond",color:"FFFFFF"})]}),
+        new Paragraph({spacing:{before:0,after:120},indent:{left:120},children:[new TextRun({text:"College of Engineering",size:20,font:"Garamond",color:"E8D5A8"})]}),
+      ]}),
+      new TableCell({width:{size:20,type:WidthType.PERCENTAGE},shading:{type:ShadingType.CLEAR,color:"auto",fill:MAROON},children:[new Paragraph({children:[new TextRun({text:"",size:20})]})]}),
+    ]}),
+  ]);
+  const bodyPs=(letter.body||"").split("\n\n").filter(x=>x.trim()).map(txt=>new Paragraph({
+    alignment:AlignmentType.JUSTIFIED,indent:{firstLine:convertInchesToTwip(0.3)},spacing:{before:0,after:160},
+    children:[new TextRun({text:txt.trim(),font:"Garamond",size:22,color:"1a1a1a"})]
+  }));
+  const doc=new Document({sections:[{properties:{page:{size:{width:convertInchesToTwip(8.5),height:convertInchesToTwip(11)},margin:{top:convertInchesToTwip(1),bottom:convertInchesToTwip(1),left:convertInchesToTwip(1.25),right:convertInchesToTwip(1.25)}}},children:[
+    hdrTable,
+    p("",{bb:true,bbs:18,sa:0}),
+    p(today,{sz:20,color:"4a4a4a",sa:120,sb:160}),
+    p(letter.subject||`Re: Nomination of ${payload.facultyName} for ${payload.awardName}`,{bold:true,color:MAROON,sa:180}),
+    p(letter.salutation||"Dear Selection Committee:",{sa:160}),
+    ...bodyPs,
+    p(letter.closing||"Sincerely,",{sb:160,sa:0}),
+    p("",{sa:0}),p("",{sa:0}),p("",{sa:0}),p("",{sa:0}),
+    new Paragraph({border:{bottom:{style:BorderStyle.SINGLE,size:4,color:"999999",space:4}},spacing:{before:0,after:80},children:[new TextRun({text:letter.signerName||"Dean of Engineering",bold:true,font:"Garamond",size:22,color:MAROON})]}),
+    p(letter.signerTitle||"Dean, College of Engineering",{sz:20,color:"4a4a4a",sa:40}),
+    p(letter.institution||"Texas A&M University",{sz:20,color:"4a4a4a",sa:40}),
+    p("College of Engineering",{sz:20,color:"4a4a4a",sa:320}),
+    p("",{bb:true,bbs:6,sa:0}),
+    p("Texas A&M University  ·  College of Engineering  ·  College Station, TX 77843",{center:true,sz:18,color:"4a4a4a",sb:60}),
+  ]}]});
+  const blob=await Packer.toBlob(doc);
+  const fname=`Nomination_${payload.facultyName.replace(/\s+/g,"_")}_${payload.awardName.replace(/\s+/g,"_")}.docx`;
+  saveAs(blob,fname);
+}
+
+function ApiKeyModal({onSave}){
+  const [k,setK]=useState(()=>localStorage.getItem("tamu_key")||"");
+  const save=()=>{if(!k.startsWith("sk-"))return;localStorage.setItem("tamu_key",k);onSave(k);};
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.65)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:2000,padding:"1rem"}}>
+    <div style={{background:B.white,borderRadius:10,padding:"2rem",maxWidth:460,width:"100%",boxShadow:"0 24px 64px rgba(0,0,0,.25)"}}>
+      <div style={{fontFamily:"Georgia,serif",fontSize:"1.3rem",fontWeight:700,color:B.gray90,marginBottom:".5rem"}}>Enter Anthropic API Key</div>
+      <p style={{fontSize:".82rem",color:B.gray70,lineHeight:1.65,marginBottom:"1.1rem"}}>Stored only in this browser and sent only to Anthropic's servers.</p>
+      <input type="password" value={k} onChange={e=>setK(e.target.value)} onKeyDown={e=>e.key==="Enter"&&save()} placeholder="sk-ant-..." style={{width:"100%",padding:"11px 13px",border:`1.5px solid ${B.divider}`,borderRadius:6,fontSize:".9rem",fontFamily:"inherit",marginBottom:".85rem",outline:"none"}}/>
+      <button onClick={save} disabled={!k.startsWith("sk-")} style={{width:"100%",padding:"11px",background:k.startsWith("sk-")?B.maroon:B.gray10,color:k.startsWith("sk-")?B.white:B.gray40,border:"none",borderRadius:6,fontSize:".9rem",fontWeight:600,cursor:k.startsWith("sk-")?"pointer":"not-allowed",fontFamily:"inherit"}}>Save &amp; Continue</button>
+      <p style={{fontSize:".72rem",color:B.gray40,marginTop:".75rem",lineHeight:1.6}}>Get a key at <a href="https://console.anthropic.com" target="_blank" style={{color:B.maroon}}>console.anthropic.com</a>. Requires claude-sonnet-4-20250514 with web search.</p>
+    </div>
+  </div>;
+}
+
+function ScoreBar({score}){const c=score>=75?B.green:score>=50?B.orange:B.gray40;return <div style={{display:"flex",alignItems:"center",gap:8}}><div style={{flex:1,height:4,background:B.divider,borderRadius:2,overflow:"hidden"}}><div style={{width:`${score}%`,height:"100%",background:c,borderRadius:2}}/></div><span style={{fontSize:12,fontWeight:700,color:c,minWidth:30}}>{score}%</span></div>;}
+function Pill({step}){if(!step)return null;const cfg={active:{bg:"#fff8e1",border:"#f9c74f",dot:"#f4a01c",text:"#7a5c00"},done:{bg:"#f0faf0",border:"#81c784",dot:B.green,text:"#1b5e20"},error:{bg:"#fdf3f3",border:"#ef9a9a",dot:B.red,text:"#b71c1c"}};const c=cfg[step.s]||cfg.active;return <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:6,fontSize:".82rem",marginBottom:"1.25rem",background:c.bg,border:`1px solid ${c.border}`,color:c.text}}><span style={{display:"inline-block",width:7,height:7,borderRadius:"50%",flexShrink:0,background:c.dot,animation:step.s==="active"?"pulse 1.2s infinite":undefined}}/>{step.t}</div>;}
+function Lbl({text}){return <label style={{fontSize:".7rem",fontWeight:700,letterSpacing:"1.2px",textTransform:"uppercase",color:B.gray70,display:"block",marginBottom:".45rem"}}>{text}</label>;}
+function PT({icon,title,sub}){return <div style={{marginBottom:"1.5rem"}}><div style={{display:"flex",alignItems:"center",gap:10,marginBottom:".3rem"}}><span style={{fontSize:20}}>{icon}</span><h2 style={{fontFamily:"Georgia,serif",fontSize:"1.3rem",fontWeight:700,color:B.gray90,margin:0}}>{title}</h2></div><p style={{fontSize:".78rem",color:B.gray70,margin:"0 0 0 30px"}}>{sub}</p></div>;}
+function SL({text}){return <div style={{fontSize:".7rem",fontWeight:700,letterSpacing:"1.3px",textTransform:"uppercase",color:B.gray40,marginBottom:".75rem",paddingBottom:".5rem",borderBottom:`1px solid ${B.divider}`}}>{text}</div>;}
+const iSt={flex:1,padding:"10px 13px",fontSize:".875rem",border:`1.5px solid ${B.divider}`,borderRadius:5,background:B.white,color:B.gray90,fontFamily:"inherit",outline:"none"};
+const bSt=(d)=>({padding:"10px 20px",background:d?B.gray10:B.maroon,color:d?B.gray40:B.white,fontSize:".85rem",fontWeight:600,border:"none",borderRadius:5,cursor:d?"not-allowed":"pointer",whiteSpace:"nowrap",fontFamily:"inherit"});
+const backSt={display:"flex",alignItems:"center",gap:5,background:"none",border:"none",color:B.gray40,fontSize:".78rem",cursor:"pointer",marginBottom:"1.5rem",padding:0,fontFamily:"inherit"};
+
+function CVUpload({cvText,setCvText,cvName,setCvName}){
+  const ref=useRef();const[drag,setDrag]=useState(false);
+  const read=(f)=>{if(!f)return;setCvName(f.name);const r=new FileReader();r.onload=e=>setCvText(e.target.result);r.readAsText(f);};
+  return <div>
+    <div onClick={()=>ref.current.click()} onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);read(e.dataTransfer.files[0]);}} style={{border:`2px dashed ${drag?B.maroon:cvText?B.green:B.divider}`,borderRadius:6,padding:"1rem 1.25rem",cursor:"pointer",textAlign:"center",background:drag?B.maroonFaint:cvText?"#f0faf0":B.gray05,transition:"all .2s"}}>
+      <input ref={ref} type="file" accept=".txt,.pdf,.doc,.docx,.md" style={{display:"none"}} onChange={e=>read(e.target.files[0])}/>
+      {cvText?<div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10}}><span style={{fontSize:18,color:B.green}}>✓</span><div style={{textAlign:"left"}}><div style={{fontSize:".8rem",fontWeight:600,color:B.green}}>{cvName}</div><div style={{fontSize:".7rem",color:B.gray40}}>{cvText.length.toLocaleString()} chars · <span onClick={e=>{e.stopPropagation();setCvText("");setCvName("");}} style={{color:B.red,cursor:"pointer",textDecoration:"underline"}}>Remove</span></div></div></div>:<div><div style={{fontSize:20,marginBottom:4}}>📄</div><div style={{fontSize:".8rem",color:B.gray70,lineHeight:1.5}}><span style={{color:B.maroon,fontWeight:600}}>Upload CV / biography</span> or drag & drop<br/><span style={{fontSize:".7rem",color:B.gray40}}>TXT, DOC, DOCX, MD — optional</span></div></div>}
+    </div>
+    {!cvText&&<textarea placeholder="Or paste CV / biography text here…" onChange={e=>{setCvText(e.target.value);setCvName("Pasted text");}} style={{marginTop:8,width:"100%",minHeight:70,padding:"10px 12px",fontSize:".78rem",background:B.gray05,border:`1px solid ${B.divider}`,borderRadius:6,color:B.gray70,fontFamily:"inherit",resize:"vertical",outline:"none"}}/>}
+  </div>;
+}
+
+function LetterModal({payload,apiKey,onClose}){
+  const [status,setStatus]=useState("loading");const[letter,setLetter]=useState(null);const[err,setErr]=useState("");const[dl,setDl]=useState(false);const ran=useRef(false);
+  const run=()=>{setStatus("loading");genLetter(payload,apiKey).then(l=>{setLetter(l);setStatus("done");}).catch(e=>{setErr(e.message);setStatus("error");});};
+  useEffect(()=>{if(ran.current)return;ran.current=true;run();},[]);
+  const download=async()=>{setDl(true);try{await downloadDocx(payload,letter);}catch(e){alert("Download error: "+e.message);}setDl(false);};
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:"1rem"}}>
+    <div style={{background:B.white,borderRadius:10,width:"100%",maxWidth:620,maxHeight:"92vh",overflow:"auto",boxShadow:"0 24px 64px rgba(0,0,0,.25)"}}>
+      <div style={{background:B.maroon,padding:"1rem 1.5rem",borderRadius:"10px 10px 0 0",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0}}>
+        <div><div style={{fontSize:".7rem",fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",color:"rgba(255,255,255,.6)",marginBottom:2}}>Nomination Letter Draft</div><div style={{fontSize:"1rem",fontWeight:700,color:B.white}}>{payload.facultyName}</div><div style={{fontSize:".75rem",color:"rgba(255,255,255,.6)",marginTop:2}}>{payload.awardName}</div></div>
+        <button onClick={onClose} style={{background:"rgba(255,255,255,.15)",border:"none",borderRadius:6,width:32,height:32,cursor:"pointer",color:B.white,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+      </div>
+      <div style={{padding:"1.5rem"}}>
+        {status==="loading"&&<div style={{textAlign:"center",padding:"2.5rem"}}><div style={{width:38,height:38,border:`3px solid ${B.divider}`,borderTopColor:B.maroon,borderRadius:"50%",animation:"spin .8s linear infinite",margin:"0 auto 1rem"}}/><div style={{fontSize:".85rem",color:B.gray70}}>Drafting nomination letter…</div></div>}
+        {status==="error"&&<div style={{padding:"1rem",background:"#fdf3f3",border:"1px solid #ef9a9a",borderRadius:6,color:B.red,fontSize:".85rem",marginBottom:"1rem"}}>{err||"Failed to generate letter."}<br/><button onClick={()=>{ran.current=false;run();}} style={{marginTop:8,padding:"6px 12px",background:B.maroon,color:B.white,border:"none",borderRadius:4,cursor:"pointer",fontSize:".78rem",fontFamily:"inherit"}}>Retry</button></div>}
+        {status==="done"&&letter&&<>
+          <div style={{background:B.gray05,border:`1px solid ${B.divider}`,borderRadius:6,padding:"1.75rem",fontFamily:"Georgia,serif",fontSize:".85rem",lineHeight:1.85,color:B.gray90,marginBottom:"1.25rem"}}>
+            <div style={{borderBottom:`3px solid ${B.maroon}`,paddingBottom:".75rem",marginBottom:"1rem"}}><div style={{fontWeight:700,fontSize:"1.05rem",color:B.maroon,letterSpacing:"1px"}}>TEXAS A&M UNIVERSITY</div><div style={{fontSize:".75rem",color:B.gray70,fontFamily:"sans-serif",marginTop:2}}>College of Engineering</div></div>
+            <div style={{fontSize:".75rem",color:B.gray40,fontFamily:"sans-serif",marginBottom:"1.1rem"}}>{new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"})}</div>
+            <div style={{marginBottom:"1rem",fontWeight:600,color:B.maroon}}>{letter.subject}</div>
+            <div style={{marginBottom:"1.1rem"}}>{letter.salutation}</div>
+            {(letter.body||"").split("\n\n").filter(p=>p.trim()).map((p,i)=><p key={i} style={{marginBottom:"1rem",textIndent:"2em"}}>{p}</p>)}
+            <div style={{marginTop:"1.75rem",marginBottom:"2.5rem"}}>{letter.closing}</div>
+            <div style={{borderTop:`1px solid ${B.gray40}`,paddingTop:".5rem",display:"inline-block",minWidth:200}}><div style={{fontWeight:700,color:B.maroon}}>{letter.signerName}</div><div style={{fontSize:".78rem",color:B.gray70}}>{letter.signerTitle}</div><div style={{fontSize:".78rem",color:B.gray70}}>{letter.institution}</div><div style={{fontSize:".78rem",color:B.gray70}}>College of Engineering</div></div>
+          </div>
+          <div style={{display:"flex",gap:10}}>
+            <button onClick={download} disabled={dl} style={{flex:1,padding:"11px",background:dl?B.gray10:B.maroon,color:dl?B.gray40:B.white,border:"none",borderRadius:6,fontSize:".875rem",fontWeight:600,cursor:dl?"not-allowed":"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>{dl?"Generating…":"📄 Download Word Document (.docx)"}</button>
+            <button onClick={onClose} style={{padding:"11px 16px",background:B.gray10,color:B.gray70,border:`1px solid ${B.divider}`,borderRadius:6,cursor:"pointer",fontFamily:"inherit",fontSize:".875rem"}}>Close</button>
+          </div>
+          <p style={{fontSize:".7rem",color:B.gray40,marginTop:".65rem",textAlign:"center"}}>AI-generated draft — review and edit before submission.</p>
+        </>}
+      </div>
+    </div>
+  </div>;
+}
+
+function AwardCard({award,researcher,apiKey,top}){
+  const [modal,setModal]=useState(false);
+  const payload={facultyName:researcher?.fullName||"",facultyPosition:researcher?.currentPosition||"",department:researcher?.institution||"Texas A&M University",researchAreas:researcher?.researchAreas||[],careerHighlights:researcher?.careerHighlights||[],awardName:award.awardName,awardOrg:award.organizationFull||award.organization,awardDescription:award.description,rationale:award.rationale,notableWorks:[]};
+  return <>{modal&&<LetterModal payload={payload} apiKey={apiKey} onClose={()=>setModal(false)}/>}
+    <div style={{background:B.white,border:`1px solid ${top?B.maroon:B.divider}`,borderLeft:`4px solid ${top?B.maroon:B.divider}`,borderRadius:6,padding:"1.1rem 1.2rem",marginBottom:".75rem",boxShadow:top?"0 2px 12px rgba(80,0,0,.08)":"0 1px 4px rgba(0,0,0,.04)"}}>
+      {top&&<div style={{display:"inline-flex",alignItems:"center",gap:5,background:B.maroon,borderRadius:3,padding:"2px 9px",fontSize:10,fontWeight:700,color:B.white,marginBottom:10,textTransform:"uppercase"}}>★ Best Match</div>}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:".75rem",marginBottom:".6rem"}}>
+        <div style={{flex:1}}><div style={{fontSize:10,fontWeight:700,letterSpacing:"1.2px",textTransform:"uppercase",color:B.maroon,marginBottom:3}}>{award.organization} · {award.field}</div><div style={{fontSize:".95rem",fontWeight:700,color:B.gray90,lineHeight:1.3}}>{award.awardName}</div><div style={{fontSize:11,color:B.gray40,marginTop:2}}>{award.organizationFull}</div></div>
+        <div style={{textAlign:"right",minWidth:100,flexShrink:0}}><div style={{fontSize:10,color:B.gray40,marginBottom:4,textTransform:"uppercase",letterSpacing:".8px"}}>Fit Score</div><ScoreBar score={award.matchScore}/>{award.careerStage&&<div style={{marginTop:5,display:"inline-block",background:B.gray10,border:`1px solid ${B.divider}`,borderRadius:3,padding:"2px 7px",fontSize:10,color:B.gray70}}>{award.careerStage}</div>}</div>
+      </div>
+      <p style={{fontSize:".8rem",color:B.gray70,marginBottom:".6rem",lineHeight:1.65}}>{award.description}</p>
+      <div style={{background:B.maroonFaint,border:"1px solid rgba(80,0,0,.1)",borderRadius:5,padding:".65rem .85rem",marginBottom:".75rem"}}><div style={{fontSize:10,fontWeight:700,letterSpacing:"1px",textTransform:"uppercase",color:B.maroon,marginBottom:4}}>Why this candidate</div><div style={{fontSize:".8rem",color:B.gray90,lineHeight:1.65}}>{award.rationale}</div></div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+        <div style={{display:"flex",flexWrap:"wrap",gap:5}}>{(award.evidenceTags||[]).slice(0,4).map((t,i)=><span key={i} style={{fontSize:10,padding:"2px 8px",borderRadius:3,background:B.gray10,border:`1px solid ${B.divider}`,color:B.gray70}}>✓ {t}</span>)}{award.nomDeadline&&<span style={{fontSize:10,color:B.gray40}}>📅 {award.nomDeadline}</span>}</div>
+        <button onClick={()=>setModal(true)} style={{display:"flex",alignItems:"center",gap:6,padding:"7px 13px",background:B.maroon,color:B.white,border:"none",borderRadius:5,fontSize:".78rem",fontWeight:600,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>📝 Generate Nomination Letter</button>
+      </div>
+    </div></>;
+}
+
+function CandidateCard({c,award,apiKey,top}){
+  const [modal,setModal]=useState(false);
+  const payload={facultyName:c.fullName,facultyPosition:c.currentPosition,department:c.department,researchAreas:c.researchAreas||[],careerHighlights:[],awardName:award?.name||"",awardOrg:award?.organizationFull||award?.organization||"",awardDescription:award?.description||"",awardEligibility:award?.eligibilitySummary||"",rationale:c.rationale,notableWorks:c.notableWorks||[]};
+  const ini=(c.fullName||"?").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase();
+  return <>{modal&&<LetterModal payload={payload} apiKey={apiKey} onClose={()=>setModal(false)}/>}
+    <div style={{background:B.white,border:`1px solid ${top?B.maroon:B.divider}`,borderLeft:`4px solid ${top?B.maroon:B.divider}`,borderRadius:6,padding:"1.1rem 1.2rem",marginBottom:".75rem",boxShadow:top?"0 2px 12px rgba(80,0,0,.08)":"0 1px 4px rgba(0,0,0,.04)"}}>
+      {top&&<div style={{display:"inline-flex",alignItems:"center",gap:5,background:B.maroon,borderRadius:3,padding:"2px 9px",fontSize:10,fontWeight:700,color:B.white,marginBottom:10,textTransform:"uppercase"}}>★ Top Candidate</div>}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:".75rem",marginBottom:".7rem"}}>
+        <div style={{display:"flex",alignItems:"flex-start",gap:".75rem",flex:1}}>
+          <div style={{width:38,height:38,borderRadius:"50%",background:B.maroonFaint,border:"2px solid rgba(80,0,0,.2)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:".9rem",fontWeight:700,color:B.maroon,flexShrink:0}}>{ini}</div>
+          <div style={{flex:1}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}><div style={{fontSize:".95rem",fontWeight:700,color:B.gray90}}>{c.fullName}</div>{c.profileUrl&&<a href={c.profileUrl} target="_blank" rel="noreferrer" style={{fontSize:10,color:B.maroon,background:B.maroonFaint,border:"1px solid rgba(80,0,0,.2)",borderRadius:3,padding:"1px 6px",textDecoration:"none",fontWeight:600}}>Profile ↗</a>}</div>
+            <div style={{fontSize:".75rem",color:B.gray70,marginTop:2}}>{c.currentPosition}{c.department?` · ${c.department}`:""}</div>
+            <div style={{display:"inline-flex",marginTop:4,background:B.maroon,borderRadius:3,padding:"1px 7px"}}><span style={{fontSize:9,fontWeight:700,color:B.white,letterSpacing:".5px"}}>TEXAS A&amp;M · COLLEGE OF ENGINEERING</span></div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:6}}>{(c.researchAreas||[]).slice(0,3).map((a,i)=><span key={i} style={{fontSize:10,background:B.maroonFaint,border:"1px solid rgba(80,0,0,.15)",borderRadius:3,padding:"1px 6px",color:B.maroon}}>{a}</span>)}</div>
+          </div>
+        </div>
+        <div style={{textAlign:"right",minWidth:100,flexShrink:0}}><div style={{fontSize:10,color:B.gray40,marginBottom:4,textTransform:"uppercase",letterSpacing:".8px"}}>Fit Score</div><ScoreBar score={c.matchScore}/>{c.careerStage&&<div style={{marginTop:5,display:"inline-block",background:B.gray10,border:`1px solid ${B.divider}`,borderRadius:3,padding:"2px 7px",fontSize:10,color:B.gray70}}>{c.careerStage}</div>}</div>
+      </div>
+      <div style={{background:B.maroonFaint,border:"1px solid rgba(80,0,0,.1)",borderRadius:5,padding:".65rem .85rem",marginBottom:c.notableWorks?.length?".65rem":".75rem"}}><div style={{fontSize:10,fontWeight:700,letterSpacing:"1px",textTransform:"uppercase",color:B.maroon,marginBottom:4}}>Why nominate</div><div style={{fontSize:".8rem",color:B.gray90,lineHeight:1.65}}>{c.rationale}</div></div>
+      {c.notableWorks?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:".75rem"}}>{c.notableWorks.slice(0,3).map((w,i)=><span key={i} style={{fontSize:10,padding:"2px 8px",borderRadius:3,background:B.gray10,border:`1px solid ${B.divider}`,color:B.gray70}}>📄 {w}</span>)}</div>}
+      <div style={{display:"flex",justifyContent:"flex-end"}}><button onClick={()=>setModal(true)} style={{display:"flex",alignItems:"center",gap:6,padding:"7px 13px",background:B.maroon,color:B.white,border:"none",borderRadius:5,fontSize:".78rem",fontWeight:600,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>📝 Generate Nomination Letter</button></div>
+    </div></>;
+}
+
+function FacultyResults({data,apiKey,onBack}){
+  const r=data.researcher;const ini=(r.fullName||"?").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase();
+  return <div><button onClick={onBack} style={backSt}>← Back to search</button>
+    <div style={{background:B.white,border:`1px solid ${B.divider}`,borderRadius:6,padding:"1.25rem 1.4rem",marginBottom:"1.5rem",display:"flex",alignItems:"flex-start",gap:"1rem",boxShadow:"0 1px 4px rgba(0,0,0,.05)"}}>
+      <div style={{width:46,height:46,borderRadius:"50%",background:B.maroon,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"1.1rem",fontWeight:700,color:B.white,flexShrink:0}}>{ini}</div>
+      <div style={{flex:1}}><div style={{fontSize:"1rem",fontWeight:700,color:B.gray90,marginBottom:2}}>{r.fullName}</div>{r.currentPosition&&<div style={{fontSize:".78rem",color:B.gray70,marginBottom:6}}>{r.currentPosition}{r.institution?` · ${r.institution}`:""}</div>}<div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>{r.totalPublications&&<span style={{fontSize:11,color:B.gray70}}><strong style={{color:B.gray90}}>{r.totalPublications}</strong> publications</span>}{(r.researchAreas||[]).slice(0,3).map((a,i)=><span key={i} style={{fontSize:10,background:B.maroonFaint,border:"1px solid rgba(80,0,0,.15)",borderRadius:3,padding:"1px 7px",color:B.maroon}}>{a}</span>)}</div></div>
+      {r.orcidId&&r.orcidId!=="null"&&<a href={`https://orcid.org/${r.orcidId}`} target="_blank" rel="noreferrer" style={{fontSize:10,color:B.green,background:"#f0faf0",border:"1px solid #81c784",borderRadius:4,padding:"3px 8px",textDecoration:"none",fontWeight:600,flexShrink:0}}>ORCID ↗</a>}
+    </div>
+    <SL text={`${data.awards?.length} Award Matches — Click "Generate Nomination Letter" on any card`}/>
+    {(data.awards||[]).map((a,i)=><AwardCard key={i} award={a} researcher={r} apiKey={apiKey} top={i===0}/>)}
+  </div>;
+}
+
+function AwardResults({data,apiKey,onBack}){
+  const aw=data.award;const pc=aw.prestige==="Exceptional"?B.maroon:aw.prestige==="Very High"?"#5c35a8":"#1565c0";
+  return <div><button onClick={onBack} style={backSt}>← Back to search</button>
+    <div style={{background:B.white,border:`1px solid ${B.divider}`,borderRadius:6,padding:"1.25rem 1.4rem",marginBottom:"1.5rem",boxShadow:"0 1px 4px rgba(0,0,0,.05)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:".75rem",marginBottom:".75rem"}}>
+        <div><div style={{fontSize:10,fontWeight:700,letterSpacing:"1.2px",textTransform:"uppercase",color:B.maroon,marginBottom:4}}>{aw.organization}</div><div style={{fontSize:"1.05rem",fontWeight:700,color:B.gray90,lineHeight:1.3}}>{aw.name}</div><div style={{fontSize:".75rem",color:B.gray40,marginTop:2}}>{aw.organizationFull}</div></div>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:5,flexShrink:0}}><div style={{background:pc,borderRadius:3,padding:"3px 9px",fontSize:10,fontWeight:700,color:B.white}}>{aw.prestige} Prestige</div>{aw.deadline&&<div style={{fontSize:10,color:B.gray40}}>📅 {aw.deadline}</div>}{aw.sourceUrl&&aw.sourceUrl!=="null"&&<a href={aw.sourceUrl} target="_blank" rel="noreferrer" style={{fontSize:10,color:B.maroon,textDecoration:"underline"}}>Award page ↗</a>}</div>
+      </div>
+      <p style={{fontSize:".8rem",color:B.gray70,marginBottom:".6rem",lineHeight:1.65}}>{aw.description}</p>
+      {aw.eligibilitySummary&&<div style={{background:B.gray10,border:`1px solid ${B.divider}`,borderRadius:5,padding:".65rem .85rem"}}><div style={{fontSize:10,fontWeight:700,letterSpacing:"1px",textTransform:"uppercase",color:B.gray70,marginBottom:4}}>Eligibility Summary</div><div style={{fontSize:".78rem",color:B.gray70,lineHeight:1.65}}>{aw.eligibilitySummary}</div></div>}
+    </div>
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:".75rem"}}><div style={{background:B.maroon,borderRadius:3,padding:"3px 10px",fontSize:10,fontWeight:700,color:B.white}}>🎓 TEXAS A&M COLLEGE OF ENGINEERING FACULTY ONLY</div></div>
+    <SL text={`${data.candidates?.length} Recommended Candidates — Click "Generate Nomination Letter" on any card`}/>
+    {(data.candidates||[]).map((c,i)=><CandidateCard key={i} c={c} award={aw} apiKey={apiKey} top={i===0}/>)}
+  </div>;
+}
+
+function SearchByFaculty({apiKey,onResult,onBack}){
+  const [q,setQ]=useState("");const[cv,setCv]=useState("");const[cvN,setCvN]=useState("");const[step,setStep]=useState(null);const[busy,setBusy]=useState(false);
+  const go=useCallback(async()=>{if(!q.trim()||busy)return;setBusy(true);setStep({t:`Researching "${q}"${cv?" using uploaded CV":" — searching web for profile & publications"}…`,s:"active"});
+    try{const msg=cv?`Research faculty member "${q}" and recommend prestigious awards. Use the provided CV.\n\nCV:\n${cv}`:`Research faculty member "${q}" and recommend prestigious awards. Search their profile and publications.`;const d=await callClaude([{role:"user",content:msg}],SYS_FACULTY(cv),apiKey);setStep({t:`Found: ${d.researcher?.fullName||q} · ${d.awards?.length||0} awards matched`,s:"done"});onResult(d,"faculty");}
+    catch(e){setStep({t:e.message||"Search failed.",s:"error"});setBusy(false);}
+  },[q,busy,cv,apiKey,onResult]);
+  return <div><button onClick={onBack} style={backSt}>← Back</button><PT icon="👤" title="Search by Faculty" sub="Enter a faculty member's name to find matching award nominations"/>
+    <Lbl text="Faculty Name"/><div style={{display:"flex",gap:8,marginBottom:"1.5rem"}}><input type="text" value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()} placeholder="e.g. Jane Smith, John Doe…" style={iSt}/><button onClick={go} disabled={busy||!q.trim()} style={bSt(busy||!q.trim())}>{busy?"Searching…":"Search"}</button></div>
+    <Lbl text={<>Upload CV <span style={{fontWeight:400,color:B.gray40,textTransform:"none",letterSpacing:0}}>(optional — improves matching)</span></>}/><div style={{marginBottom:"1.25rem"}}><CVUpload cvText={cv} setCvText={setCv} cvName={cvN} setCvName={setCvN}/></div><Pill step={step}/>
+  </div>;
+}
+
+function SearchByAward({apiKey,onResult,onBack}){
+  const [q,setQ]=useState("");const[url,setUrl]=useState("");const[step,setStep]=useState(null);const[busy,setBusy]=useState(false);
+  const go=useCallback(async()=>{if(!q.trim()||busy)return;setBusy(true);setStep({t:`Researching "${q}"${url?" using provided URL":""} — finding criteria & searching TAMU CoE faculty…`,s:"active"});
+    try{const details=url?`Award name: ${q}\nAward URL: ${url}`:`Award name: ${q}`;const msg=`Find eligibility for "${q}"${url?` (page: ${url})`:""} and identify 5 best matching Texas A&M College of Engineering faculty. Search engineering.tamu.edu.`;const d=await callClaude([{role:"user",content:msg}],SYS_AWARD(details),apiKey);setStep({t:`Found ${d.candidates?.length||0} TAMU CoE candidates for ${d.award?.name||q}`,s:"done"});onResult(d,"award");}
+    catch(e){setStep({t:e.message||"Search failed.",s:"error"});setBusy(false);}
+  },[q,url,busy,apiKey,onResult]);
+  return <div><button onClick={onBack} style={backSt}>← Back</button><PT icon="🏆" title="Search by Award" sub="Find the best Texas A&M College of Engineering faculty candidates for a nomination"/>
+    <Lbl text="Award Name"/><div style={{display:"flex",gap:8,marginBottom:"1.25rem"}}><input type="text" value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()} placeholder="e.g. ACM Turing Award, Sloan Research Fellowship, NSF CAREER…" style={iSt}/><button onClick={go} disabled={busy||!q.trim()} style={bSt(busy||!q.trim())}>{busy?"Searching…":"Search"}</button></div>
+    <Lbl text={<>Award URL <span style={{fontWeight:400,color:B.gray40,textTransform:"none",letterSpacing:0}}>(optional — official award page for eligibility criteria)</span></>}/>
+    <div style={{marginBottom:"1.5rem"}}><div style={{position:"relative"}}><span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:13,color:B.gray40}}>🔗</span><input type="url" value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://www.example.org/award-page" style={{...iSt,paddingLeft:34,width:"100%"}}/></div>{url&&<div style={{marginTop:6,fontSize:".72rem",color:B.green,display:"flex",alignItems:"center",gap:4}}>✓ AI will read this page for official eligibility criteria</div>}</div>
+    <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:B.maroonFaint,border:"1px solid rgba(80,0,0,.15)",borderRadius:5,marginBottom:"1.25rem"}}><span style={{fontSize:14}}>🎓</span><span style={{fontSize:".75rem",color:B.maroon,fontWeight:500}}>Results limited to <strong>Texas A&M University College of Engineering</strong> faculty only</span></div>
+    <Pill step={step}/>
+  </div>;
+}
+
+function Landing({onMode}){
+  const [hov,setHov]=useState(null);
+  const modes=[{id:"faculty",icon:"👤",title:"Search by Faculty",sub:"Find awards for a researcher",desc:"Enter a faculty member's name and optionally upload their CV. AI recommends the best awards and generates a nomination letter.",tags:["CV upload","Award matching","📝 Letter generation"]},{id:"award",icon:"🏆",title:"Search by Award",sub:"Find TAMU CoE candidates",desc:"Enter an award name and optionally the award URL. AI finds the best-matching TAMU College of Engineering faculty to nominate.",tags:["Award URL","TAMU CoE only","📝 Letter generation"]}];
+  return <div style={{padding:"2rem 0 1rem"}}>
+    <div style={{borderLeft:`4px solid ${B.maroon}`,paddingLeft:"1.1rem",marginBottom:"2rem"}}><h2 style={{fontSize:"1.35rem",fontWeight:700,color:B.gray90,margin:"0 0 .35rem",fontFamily:"Georgia,serif"}}>Award Nomination Tool</h2><p style={{fontSize:".85rem",color:B.gray70,lineHeight:1.65,margin:0}}>AI-powered matching between College of Engineering faculty and prestigious academic awards — with one-click nomination letter generation.</p></div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"1rem",marginBottom:"2rem"}}>
+      {modes.map(m=><div key={m.id} onClick={()=>onMode(m.id)} onMouseEnter={()=>setHov(m.id)} onMouseLeave={()=>setHov(null)} style={{background:hov===m.id?B.maroonFaint:B.white,border:`1.5px solid ${hov===m.id?B.maroon:B.divider}`,borderTop:`4px solid ${hov===m.id?B.maroon:B.divider}`,borderRadius:6,padding:"1.4rem 1.2rem",cursor:"pointer",transition:"all .18s",boxShadow:hov===m.id?"0 4px 16px rgba(80,0,0,.1)":"0 1px 4px rgba(0,0,0,.04)"}}>
+        <div style={{fontSize:26,marginBottom:".6rem"}}>{m.icon}</div><div style={{fontSize:"1rem",fontWeight:700,color:B.gray90,marginBottom:3}}>{m.title}</div><div style={{fontSize:".7rem",color:B.maroon,fontWeight:700,marginBottom:".5rem",textTransform:"uppercase",letterSpacing:".8px"}}>{m.sub}</div><p style={{fontSize:".78rem",color:B.gray70,lineHeight:1.6,marginBottom:".85rem"}}>{m.desc}</p>
+        <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:".85rem"}}>{m.tags.map((t,i)=><span key={i} style={{fontSize:10,padding:"2px 7px",borderRadius:3,background:t.includes("📝")?B.maroonFaint:B.gray10,border:`1px solid ${t.includes("📝")?"rgba(80,0,0,.2)":B.divider}`,color:t.includes("📝")?B.maroon:B.gray70}}>{t}</span>)}</div>
+        <div style={{fontSize:".8rem",fontWeight:600,color:hov===m.id?B.maroon:B.gray40}}>Get started →</div>
+      </div>)}
+    </div>
+    <div style={{background:B.white,border:`1px solid ${B.divider}`,borderRadius:6,padding:"1rem 1.25rem",marginBottom:"1rem"}}>
+      <div style={{fontSize:".7rem",fontWeight:700,letterSpacing:"1.2px",textTransform:"uppercase",color:B.gray70,marginBottom:".75rem"}}>How it works</div>
+      <div style={{display:"flex",alignItems:"flex-start",gap:4,flexWrap:"wrap"}}>
+        {["Search by faculty or award","AI researches via web","Review ranked results","Click Generate Letter","Download .docx"].map((s,i,arr)=><React.Fragment key={s}><div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5,flex:1,minWidth:80}}><div style={{width:28,height:28,borderRadius:"50%",background:i===4?B.maroon:B.maroonFaint,border:`2px solid ${B.maroon}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:i===4?B.white:B.maroon}}>{i+1}</div><div style={{fontSize:".68rem",color:B.gray70,textAlign:"center",lineHeight:1.4}}>{s}</div></div>{i<arr.length-1&&<div style={{fontSize:16,color:B.divider,flexShrink:0,marginTop:6}}>›</div>}</React.Fragment>)}
+      </div>
+    </div>
+    <div style={{background:B.maroonFaint,border:"1px solid rgba(80,0,0,.15)",borderRadius:6,padding:".9rem 1.1rem",display:"flex",alignItems:"flex-start",gap:10}}><span style={{fontSize:16,flexShrink:0}}>ℹ️</span><p style={{fontSize:".75rem",color:B.maroon,lineHeight:1.6,margin:0}}><strong>Award search</strong> is scoped to Texas A&M University College of Engineering faculty only. <strong>Faculty search</strong> accepts an optional CV upload. Both modes generate nomination letters as downloadable <strong>Word documents</strong>.</p></div>
+  </div>;
+}
+
+function App(){
+  const [apiKey,setApiKey]=useState(()=>WORKER_URL?"__worker__":(localStorage.getItem("tamu_key")||""));
+  const [screen,setScreen]=useState("home");const[resultData,setResultData]=useState(null);const[resultType,setResultType]=useState(null);
+  const handleResult=useCallback((data,type)=>{setResultData(data);setResultType(type);setScreen("results");},[]);
+  return <div style={{fontFamily:"'Helvetica Neue',Arial,sans-serif",background:B.gray10,minHeight:"100vh",color:B.gray90}}>
+    {!WORKER_URL&&!apiKey&&<ApiKeyModal onSave={setApiKey}/>}
+    <header style={{background:B.maroon}}>
+      <div style={{padding:".75rem 1.5rem",display:"flex",alignItems:"center",justifyContent:"space-between",borderBottom:"1px solid rgba(255,255,255,.15)"}}>
+        <button onClick={()=>setScreen("home")} style={{background:"none",border:"none",cursor:"pointer",padding:0}}>
+          <img src="https://engineering.tamu.edu/_assets/images/logo.svg" alt="Texas A&M University College of Engineering" height={44} style={{display:"block",filter:"brightness(0) invert(1)"}} onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="block";}}/>
+          <div style={{display:"none",fontFamily:"serif",fontWeight:700,fontSize:".95rem",color:"#fff",letterSpacing:"1px",lineHeight:1.4}}>TEXAS A&amp;M<br/><span style={{fontSize:".65rem",fontWeight:400,opacity:.8}}>COLLEGE OF ENGINEERING</span></div>
+        </button>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          {!WORKER_URL&&apiKey&&<button onClick={()=>{setApiKey("");localStorage.removeItem("tamu_key");}} style={{fontSize:".68rem",color:"rgba(255,255,255,.4)",background:"none",border:"1px solid rgba(255,255,255,.15)",borderRadius:4,padding:"3px 8px",cursor:"pointer",fontFamily:"inherit"}}>🔑 Change API key</button>}
+          <div style={{fontSize:".7rem",color:"rgba(255,255,255,.55)",textAlign:"right",lineHeight:1.5}}>Faculty Award<br/>Nomination Tool</div>
+        </div>
+      </div>
+      <div style={{padding:"0 1.5rem",display:"flex",alignItems:"center",gap:2,background:"rgba(0,0,0,.15)"}}>
+        {[{id:"home",label:"Home"},{id:"faculty",label:"Search by Faculty"},{id:"award",label:"Search by Award"}].map(tab=><button key={tab.id} onClick={()=>setScreen(tab.id)} style={{padding:".5rem .85rem",background:screen===tab.id?B.white:"transparent",border:"none",borderBottom:screen===tab.id?`3px solid ${B.white}`:"3px solid transparent",color:screen===tab.id?B.maroon:"rgba(255,255,255,.7)",fontSize:".75rem",fontWeight:screen===tab.id?700:400,cursor:"pointer",fontFamily:"inherit",transition:"all .15s",borderRadius:0}}>{tab.label}</button>)}
+      </div>
+    </header>
+    <main style={{maxWidth:760,margin:"0 auto",padding:"0 1.25rem 3rem"}}>
+      {screen==="home"&&<Landing onMode={setScreen}/>}
+      {screen==="faculty"&&<div style={{paddingTop:"1.75rem"}}><SearchByFaculty apiKey={apiKey} onResult={handleResult} onBack={()=>setScreen("home")}/></div>}
+      {screen==="award"&&<div style={{paddingTop:"1.75rem"}}><SearchByAward apiKey={apiKey} onResult={handleResult} onBack={()=>setScreen("home")}/></div>}
+      {screen==="results"&&resultData&&<div style={{paddingTop:"1.75rem"}}>{resultType==="faculty"?<FacultyResults data={resultData} apiKey={apiKey} onBack={()=>setScreen("faculty")}/>:<AwardResults data={resultData} apiKey={apiKey} onBack={()=>setScreen("award")}/>}</div>}
+    </main>
+    <footer style={{background:B.maroon,padding:"1.1rem 1.5rem"}}>
+      <div style={{maxWidth:760,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:".75rem"}}>
+        <img src="https://engineering.tamu.edu/_assets/images/logo.svg" alt="Texas A&M University College of Engineering" height={32} style={{display:"block",filter:"brightness(0) invert(1)",opacity:.8}}/>
+        <div style={{fontSize:".68rem",color:"rgba(255,255,255,.4)",textAlign:"right",lineHeight:1.6}}>Powered by Claude AI · Recommendations are illustrative<br/>Always verify eligibility with the awarding organization</div>
+      </div>
+    </footer>
+  </div>;
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
